@@ -21,12 +21,14 @@ import logging
 import requests
 from grimoirelab_toolkit.datetime import datetime_to_utc, datetime_utcnow
 from grimoirelab_toolkit.uris import urijoin
+import bs4
+import re
 
 
 from ...backend import (Backend,
                         BackendCommand,
-                        BackendCommandArgumentParser)
-
+                        BackendCommandArgumentParser,
+                        uuid)
 from ...client import HttpClient
 from ...errors import BaseError
 from ...utils import DEFAULT_DATETIME
@@ -61,18 +63,16 @@ class Marvel(Backend):
 
     CATEGORIES = [CATEGORY_MESSAGE]
 
-    def __init__(self, tag=None, archive=None, ssl_verify=False):
-        origin = urijoin(MARVEL_URL, CATEGORY_MESSAGE, "?ts=1&apikey=")
+    def __init__(self,tag=None, archive=None, ssl_verify=False):
+        origin = urijoin(MARVEL_URL, CATEGORY_MESSAGE,"?ts=1&apikey=")
 
         super().__init__(origin, tag=tag, archive=archive, ssl_verify=ssl_verify)
         self.client = None
-        self.api_token = "?ts=1&apikey=5e0ce6bef48a467420ab10da790957e9&hash=14ad257fd4adf0d881cb9c49d2ca8ada"
+        self.api_token="ts=1&format=comic&apikey=5e0ce6bef48a467420ab10da790957e9&hash=14ad257fd4adf0d881cb9c49d2ca8ada"
+
 
     def fetch(self, category=CATEGORY_MESSAGE):
         """Fetch the comics from the channel.
-
-        This method fetches the messages stored on the channel that were
-        sent since the given date.
 
         :param category: the category of items to fetch
         :param from_date: obtain messages sent since this date
@@ -93,20 +93,18 @@ class Marvel(Backend):
         :returns: a generator of items
         """
         logger.info("Fetching data for '%s'", category)
-        url = urijoin(MARVEL_URL, category)
-        URL = url + self.api_token
 
-        # hits_raw = self.client.hits()
-        # hits = self.__parse_hits(hits_raw)
+        hits_raw = self.client.hits()
+        # print(hits_raw)
+        hits = self.__parse_hits(hits_raw)
+        yield hits
 
-        # yield hits
+        # response=requests.get(URL)
+        # data = response.json()
+        # logger.info(data)
+        # logger.info("Fetch process completed")
+        # yield data
 
-        response = requests.get(URL)
-
-        data = response.json()
-        logger.info(data)
-        logger.info("Fetch process completed")
-        yield data
 
     @classmethod
     def has_archiving(cls):
@@ -126,20 +124,14 @@ class Marvel(Backend):
 
     @staticmethod
     def metadata_id(item):
-        """Extracts the identifier from a Slack item.
-
-        This identifier will be the mix of two fields because Slack
-        messages does not have any unique identifier. In this case,
-        'ts' and 'user' values (or 'bot_id' when the message is sent by a bot)
-        are combined because there have been cases where two messages were sent
-        by different users at the same time.
+        """Extracts the identifier from a Marvel item.
         """
 
         return item['id']
 
     @staticmethod
     def metadata_updated_on(item):
-        """Extracts and coverts the update time from a Slack item.
+        """Extracts and coverts the update time from a Marvel item.
 
         The timestamp is extracted from 'ts' field and converted
         to a UNIX timestamp.
@@ -152,75 +144,55 @@ class Marvel(Backend):
 
     @staticmethod
     def metadata_category(item):
-        """Extracts the category from a Slack item.
+        """Extracts the category from a marvel item.
 
         This backend only generates one type of item which is
         'message'.
         """
         return CATEGORY_MESSAGE
 
-    @staticmethod
-    def parse_channel_info(raw_channel_info):
-        """Parse a channel info JSON stream.
-
-        This method parses a JSON stream, containing the information
-        from a channel, and returns a dict with the parsed data.
-
-        :param raw_channel_info
-
-        :returns: a dict with the parsed information about a channel
-        """
-        result = json.loads(raw_channel_info)
-        return result['channel']
-
-    @staticmethod
-    def parse_history(raw_history):
-        """Parse a channel history JSON stream.
-
-        This method parses a JSON stream, containing the history of
-        a channel, and returns a list with the parsed data. It also
-        returns if there are more messages that are not included on
-        this stream.
-
-        :param raw_history: JSON string to parse
-
-        :returns: a tuple with a list of dicts with the parsed messages
-            and 'has_more' value
-        """
-        result = json.loads(raw_history)
-        return result['messages'], result['has_more']
-
-    @staticmethod
-    def parse_user(raw_user):
-        """Parse a user's info JSON stream.
-
-        This method parses a JSON stream, containing the information
-        from a user, and returns a dict with the parsed data.
-
-        :param raw_user: JSON string to parse
-
-        :returns: a dict with the parsed user's information
-        """
-        result = json.loads(raw_user)
-        return result['user']
 
     def _init_client(self, from_archive=False):
         """Init client"""
 
         return MarvelClient(self.api_token, self.archive,
-                            from_archive, self.ssl_verify)
+                           from_archive, self.ssl_verify)
 
-    def __get_or_fetch_user(self, user_id):
-        if user_id in self._users:
-            return self._users[user_id]
 
-        logger.debug("User %s not found on client cache; fetching it", user_id)
+    def __parse_hits(self, hit_raw):
+        """Parse the hits returned by the Marvel API"""
 
-        raw_user = self.client.user(user_id)
-        user = self.parse_user(raw_user)
+        # Create the soup and get the desired div
+        bs_result = bs4.BeautifulSoup(hit_raw, 'html.parser')
+        # print((bs_result.prettify()))
+        hit_string = bs_result.find("div", id="id").text
+        print(hit_string)
+        # Remove commas or dots
+        # hit_string = hit_string.replace(',', u'')
+        # hit_string = hit_string.replace('.', u'')
 
-        self._users[user_id] = user
-        return user
+        fetched_on = datetime_utcnow().timestamp()
+        # id_args = self.keywords[:]
+        id_args=[]
+        id_args.append(str(fetched_on))
+
+        hits_json = {
+            'fetched_on': fetched_on,
+            'id': uuid(*id_args),
+            'type': 'Comic'
+        }
+
+        # if not hit_string:
+        #     logger.warning("No hits for %s", self.keywords)
+        #     hits_json['hits'] = 0
+        #
+        #     return hits_json
+
+        str_hits = re.search(r'\d+', hit_string).group(0)
+        hits = int(str_hits)
+        hits_json['hits'] = hits
+
+        return hits_json
 
 
 class MarvelClientError(BaseError):
@@ -232,7 +204,7 @@ class MarvelClientError(BaseError):
 class MarvelClient(HttpClient):
     """Marvel API client.
 
-    Client for fetching information from the Slack server
+    Client for fetching information from the Marvel server
     using its REST API.
 
     :param api_token: key needed to use the API
@@ -241,115 +213,27 @@ class MarvelClient(HttpClient):
     :param from_archive: it tells whether to write/read the archive
     :param ssl_verify: enable/disable SSL verification
     """
-    URL = urijoin(MARVEL_URL, CATEGORY_MESSAGE)
+    URL = urijoin(MARVEL_URL, CATEGORY_MESSAGE )
+    # print("This is the URl",URL)
 
     def __init__(self, api_token, archive=None, from_archive=False, ssl_verify=True):
         super().__init__(MARVEL_URL, archive=archive, from_archive=from_archive, ssl_verify=ssl_verify)
         self.api_token = api_token
 
-    def conversation_members(self, conversation):
-        """Fetch the number of members in a conversation, which is a supertype for public and
-        private ones, DM and group DM.
+    def hits(self):
+        """Fetch information about a list of keywords."""
 
-        :param conversation: the ID of the conversation
-        """
-        members = 0
 
-        resource = self.RCONVERSATION_INFO
+        # query_str = ' '.join([k for k in keywords])
+        # url=urijoin(MARVEL_URL,CATEGORY_MESSAGE)
+        query_str = self.api_token
 
-        params = {
-            self.PCHANNEL: conversation,
-        }
+        logger.info("Fetching hits for '%s'", query_str)
+        print(self.URL,query_str)
+        # Make the request
+        req = self.fetch(self.URL,payload=query_str)
 
-        raw_response = self._fetch(resource, params)
-        response = json.loads(raw_response)
-
-        members += len(response["members"])
-        while 'next_cursor' in response['response_metadata'] and response['response_metadata']['next_cursor']:
-            params['cursor'] = response['response_metadata']['next_cursor']
-            raw_response = self._fetch(resource, params)
-            response = json.loads(raw_response)
-            members += len(response["members"])
-
-        return members
-
-    def user(self, user_id):
-        """Fetch user info."""
-
-        resource = self.RUSER_INFO
-
-        params = {
-            self.PUSER: user_id
-        }
-
-        response = self._fetch(resource, params)
-
-        return response
-
-    @staticmethod
-    def sanitize_for_archive(url, headers, payload):
-        """Sanitize payload of a HTTP request by removing the token information
-        before storing/retrieving archived items
-
-        :param: url: HTTP url request
-        :param: headers: HTTP headers request
-        :param: payload: HTTP payload request
-
-        :returns url, headers and the sanitized payload
-        """
-        if MarvelClient.AUTHORIZATION_HEADER in headers:
-            headers.pop(MarvelClient.AUTHORIZATION_HEADER)
-
-        return url, headers, payload
-
-    def _fetch(self, resource, params):
-        """Fetch a resource.
-
-        :param resource: resource to get
-        :param params: dict with the HTTP parameters needed to get
-            the given resource
-        """
-        url = self.URL % {'resource': resource}
-        headers = {
-            self.AUTHORIZATION_HEADER: 'Bearer {}'.format(self.api_token)
-        }
-
-        logger.debug("Slack client requests: %s params: %s",
-                     resource, str(params))
-
-        r = self.fetch(url, payload=params, headers=headers)
-
-        # Check for possible API errors
-        result = r.json()
-
-        if not result['ok']:
-            raise MarvelClientError(error=result['error'])
-
-        return r.text
-
-    def __format_timestamp(self, ts, subtract=False):
-        """Handle the timestamp value to be passed to the channels.history API endpoint. In
-        particular, two cases are covered:
-
-        - Since the minimum value supported by Slack is 0, the value 0.0 must be converted.
-        - Slack does not include in its result the lower limit of the search if it has
-          the same date of 'oldest'. To get this messages too, we subtract a low value to
-          be sure the dates are not the same. To avoid precision problems it is subtracted
-          by five decimals and not by six.
-
-        :param ts: timestamp float value
-        :param subtract: if True, `ts` is decreased by 0.00001
-        """
-        if ts == 0.0:
-            return "0"
-
-        processed = ts
-        if processed > 0.0 and subtract:
-            processed -= .00001
-
-        processed = FLOAT_FORMAT.format(processed)
-
-        return processed
+        return req.text
 
 
 class MarvelCommand(BackendCommand):
@@ -359,7 +243,7 @@ class MarvelCommand(BackendCommand):
 
     @classmethod
     def setup_cmd_parser(cls):
-        """Returns the Slack argument parser."""
+        """Returns the Marvel argument parser."""
 
         parser = BackendCommandArgumentParser(cls.BACKEND,
                                               archive=True,
